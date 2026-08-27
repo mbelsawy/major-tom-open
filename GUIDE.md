@@ -41,7 +41,7 @@ publish a running web app's port so you can view it on your phone. Survives rebo
 |---|---|
 | **Search** | Matches instance name, group, or folder path |
 | **All / ● On / Off** | Filter by power state |
-| **Group by** | *No grouping* · *By group* (the label you set) · *By project* (first folder under `~/Projects`, so `mazint/api` and `mazint/apps/containers` sit together) |
+| **Group by** | *No grouping* · *By group* (the label you set) · *By project* (first folder under `~/Projects`, so `acme/api` and `acme/apps/containers` sit together) |
 | **Sort** | A → Z · Newest created · Recently changed |
 | **Active / Archived** | Switch between the live list and the parked one |
 

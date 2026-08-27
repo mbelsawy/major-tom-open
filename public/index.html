@@ -236,7 +236,7 @@ function syncTools(){
   document.getElementById('groupBy').value=UI.groupBy;
   document.getElementById('sortBy').value=UI.sort;
 }
-// Derived grouping: first path segment under ~/Projects (mazint/apps/containers → mazint).
+// Derived grouping: first path segment under ~/Projects (acme/apps/api → acme).
 function folderGroup(i){
   const root=(STATE.projectsRoot||'')+'/';
   let rel=i.folder||'';
@@ -341,14 +341,14 @@ function detailHTML(i){
 
     <div class="panel pad">
       <div class="mini">Group</div>
-      <input id="d_group" list="grouplist" placeholder="e.g. MAZ Int, Encon, Personal" value="${esc(i.group||'')}" onchange="setGroup(this.value)">
+      <input id="d_group" list="grouplist" placeholder="e.g. Work, Personal, Infra" value="${esc(i.group||'')}" onchange="setGroup(this.value)">
       <datalist id="grouplist">${groupOptions()}</datalist>
       <div style="color:var(--dim);font-size:11px;margin-top:5px">Drives “By group” in the sidebar. Blank = Ungrouped.</div>
     </div>
 
     <div class="panel pad">
       <div class="mini">Obsidian vault folder</div>
-      <input id="d_vault" list="vaultlist" placeholder="e.g. 157/OW" value="${i.vaultFolder || ''}" onchange="setVault(this.value)">
+      <input id="d_vault" list="vaultlist" placeholder="e.g. clients/acme" value="${i.vaultFolder || ''}" onchange="setVault(this.value)">
       <datalist id="vaultlist">${(STATE.vaultFolders || []).map((f) => `<option value="${f}">`).join('')}</datalist>
       <div style="color:var(--dim);font-size:11px;margin-top:5px">Gives this instance's Claude <code>--add-dir</code> access to that vault folder. Needs Full Disk Access granted to node (see setup).</div>
     </div>
@@ -495,15 +495,15 @@ function showNew(){
     <div class="d-title" style="margin-bottom:20px">New instance</div>
     <div class="panel pad">
       <label class="fld">Instance name</label>
-      <input id="n_name" placeholder="e.g. mazint or new-idea" autocapitalize="off" autocomplete="off" oninput="updateFolderSel()">
+      <input id="n_name" placeholder="e.g. web-app or new-idea" autocapitalize="off" autocomplete="off" oninput="updateFolderSel()">
       <label class="fld" style="margin-top:14px">Folder — tap a folder to select · tap ＋ to create one inside it</label>
       <div id="n_folderinfo" style="font-size:12px;color:var(--dim);margin-bottom:6px">No folder selected</div>
       <div class="folderpick" id="n_foldertree"></div>
       <label class="fld" style="margin-top:14px">Group (optional)</label>
-      <input id="n_group" list="grouplist" placeholder="e.g. MAZ Int, Encon, Personal" autocomplete="off">
+      <input id="n_group" list="grouplist" placeholder="e.g. Work, Personal, Infra" autocomplete="off">
       <datalist id="grouplist">${groupOptions()}</datalist>
       <label class="fld" style="margin-top:14px">Obsidian vault folder (optional)</label>
-      <input id="n_vault" list="vaultlist" placeholder="e.g. 157/OW">
+      <input id="n_vault" list="vaultlist" placeholder="e.g. clients/acme">
       <datalist id="vaultlist">${(STATE.vaultFolders||[]).map(f=>`<option value="${f}">`).join('')}</datalist>
     </div>
     <div class="panel">
