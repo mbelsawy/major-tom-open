@@ -1,7 +1,7 @@
 # Major Tom
 
 A self-hosted web control panel for managing **tmux "instances"** (one persistent terminal
-per project) on the Mac Studio, reachable from phone/laptop over Tailscale. Start/stop/name
+per project), reachable from phone/laptop over Tailscale. Start/stop/name
 instances, send commands, run & remote-control Claude, publish app ports, link Obsidian docs,
 and run scheduled custom commands. Dependency-free Node backend + a single-file web UI.
 

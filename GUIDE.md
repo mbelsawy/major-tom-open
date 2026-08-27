@@ -1,6 +1,6 @@
 # Major Tom — web control panel + persistent terminals
 
-A web app on the **Mac Studio** (`myhost`) that manages tmux "instances"
+A web app on your dev machine that manages tmux "instances"
 (one persistent terminal per project). Open it on your phone or laptop over Tailscale and:
 start/name/stop instances, send commands, run/exit Claude, open a live terminal, and
 publish a running web app's port so you can view it on your phone. Survives reboots.
