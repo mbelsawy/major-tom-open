@@ -1,0 +1,21 @@
+# --- secrets -----------------------------------------------------------------
+# scrypt salt+hash of the panel password AND the HMAC key that signs login
+# cookies. Leaking `secret` alone lets anyone forge an authenticated session.
+auth.json
+
+# --- runtime state (rewritten on every change; not source) --------------------
+instances.json
+commands.json
+logs/
+
+# --- launchd stdout/stderr ----------------------------------------------------
+server.log
+server.err.log
+
+# --- local backups ------------------------------------------------------------
+*.bak-*
+*.bak.*
+
+# --- build/derived ------------------------------------------------------------
+.DS_Store
+node_modules/

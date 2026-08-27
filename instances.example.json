@@ -1,0 +1,19 @@
+{
+  "instances": [
+    {
+      "name": "example_project",
+      "folder": "/Users/you/Projects/example",
+      "autostart": true,
+      "remoteControl": true,
+      "startClaude": true,
+      "resume": true,
+      "vaultFolder": null,
+      "group": "Personal",
+      "archived": false,
+      "publishedPorts": [],
+      "commands": [],
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z"
+    }
+  ]
+}
