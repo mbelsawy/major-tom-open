@@ -15,6 +15,7 @@
   html,body{height:100%}
   body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
   .hide{display:none!important}
+  .hostb{font-size:9.5px;font-weight:800;letter-spacing:.06em;color:var(--dim);border:1px solid var(--line);border-radius:5px;padding:1px 5px;text-transform:uppercase;white-space:nowrap}
   button{font-family:inherit}
   .btn{appearance:none;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:9px;padding:9px 13px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:.12s}
   .btn:hover{border-color:#54514c} .btn:active{transform:scale(.98)} .btn:disabled{opacity:.4;cursor:not-allowed}
@@ -252,6 +253,7 @@ function itemHTML(i){
   return `<div class="item ${current===i.name?'active':''}" onclick="selectInstance('${i.name}')">
       <span class="dot ${i.running?'on':''}"></span>
       <span class="nm">${esc(i.name)}</span>
+      ${i.hostId&&i.hostId!==STATE.selfHost?`<span class="hostb">${esc(i.hostLabel||i.hostId)}</span>`:''}
       ${i.remoteControl?'<span class="rc">RC</span>':''}
       ${i.archived?'<span class="arch">ARCH</span>':''}
     </div>`;
@@ -330,6 +332,13 @@ function detailHTML(i){
       <span id="d_pills" style="display:flex;gap:6px">${r?'<span class="pill on">RUNNING</span>':'<span class="pill off">STOPPED</span>'}${i.claudeRunning?' <span class="pill cl">claude</span>':''}</span>
     </div>
     <div class="d-folder">${i.folder}</div>
+    <div class="panel pad">
+      <div class="mini">Host</div>
+      <select id="d_host" onchange="setHost(this.value)" ${r?'disabled':''}>
+        ${(STATE.hosts||[]).map(h=>`<option value="${esc(h.id)}" ${h.id===i.hostId?'selected':''}>${esc(h.label)}${h.local?' — this machine':''}</option>`).join('')}
+      </select>
+      <div style="color:var(--dim);font-size:11px;margin-top:5px">${r?'Power the instance off to move it — its tmux session lives on the current host.':'Where this instance\u2019s tmux session runs. The folder path is not migrated.'}</div>
+    </div>
 
     <div class="panel">
       <div class="toggle"><span><b>Power</b> &nbsp;<span style="color:var(--dim);font-size:12px">run this instance</span></span><label class="sw"><input type="checkbox" id="d_power" ${r?'checked':''} onchange="power(this.checked)"><span class="track"></span></label></div>
@@ -444,6 +453,7 @@ async function power(on){ await api(`/instances/${current}/power`,'POST',{on}); 
 async function toggleAuto(on){ await api(`/instances/${current}/autostart`,'POST',{on}); }
 async function toggleRemote(on){ await api(`/instances/${current}/remote-control`,'POST',{on}); setTimeout(loadOutput,700); }
 async function toggleResume(on){ await api(`/instances/${current}/resume`,'POST',{on}); }
+async function setHost(h){ const r=await api(`/instances/${current}/host`,'POST',{host:h}); if(r.error){alert(r.error);} await refresh(); if(current) selectInstance(current); }
 async function startClaude(){ await api(`/instances/${current}/power`,'POST',{on:true}); refresh(); setTimeout(loadOutput,900); }
 async function exitClaude(){ await api(`/instances/${current}/exit-claude`,'POST',{}); setTimeout(()=>{refresh();loadOutput();},700); }
 async function send(){ const el=document.getElementById('d_cmd'); const v=el.value; if(!v)return; await api(`/instances/${current}/send`,'POST',{keys:v}); el.value=''; setTimeout(loadOutput,500); }
@@ -494,6 +504,10 @@ function showNew(){
     <button class="btn ghost sm back" onclick="showEmpty()" style="margin-bottom:14px">‹ Instances</button>
     <div class="d-title" style="margin-bottom:20px">New instance</div>
     <div class="panel pad">
+      <label class="fld">Host — where this instance's tmux session runs</label>
+      <select id="n_host" onchange="hostChanged()" style="width:100%;margin-bottom:14px">
+        ${(STATE.hosts||[]).map(h=>`<option value="${esc(h.id)}" ${h.id===(STATE.selfHost||'')?'selected':''}>${esc(h.label)}${h.local?' — this machine':''}</option>`).join('')}
+      </select>
       <label class="fld">Instance name</label>
       <input id="n_name" placeholder="e.g. web-app or new-idea" autocapitalize="off" autocomplete="off" oninput="updateFolderSel()">
       <label class="fld" style="margin-top:14px">Folder — tap a folder to select · tap ＋ to create one inside it</label>
@@ -515,11 +529,19 @@ function showNew(){
     <div class="row"><button class="btn pri" style="flex:1;justify-content:center" onclick="create()">Create instance</button><button class="btn ghost" onclick="showEmpty()">Cancel</button></div>
     <p id="n_err" style="color:var(--danger);font-size:12px;margin:10px 0 0"></p>
   </div>`);
-  selectedFolder=null; renderFolderTree(); updateFolderSel();
+  selectedFolder=null; renderFolderTree(); updateFolderSel(); hostChanged();
   setTimeout(()=>document.getElementById('n_name').focus(),50);
 }
 /* ---- folder tree picker ---- */
-let selectedFolder=null;
+let selectedFolder=null, newHostFolders=null;
+function newHostId(){ const el=document.getElementById('n_host'); return el?el.value:(STATE.selfHost||''); }
+async function hostChanged(){
+  const c=document.getElementById('n_foldertree'); if(c) c.innerHTML='<div style="color:var(--dim);font-size:12px;padding:10px">Loading folders…</div>';
+  selectedFolder=null;
+  try{ const d=await api(`/state?host=${encodeURIComponent(newHostId())}`); newHostFolders=d.folders||[]; }
+  catch{ newHostFolders=[]; }
+  renderFolderTree(); updateFolderSel();
+}
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function buildTree(paths){ const root={}; for(const p of paths){ let node=root; for(const part of p.split('/')){ node[part]=node[part]||{}; node=node[part]; } } return root; }
 function renderLevel(node, prefix, depth){
@@ -538,7 +560,7 @@ function renderLevel(node, prefix, depth){
 function renderFolderTree(){
   const c=document.getElementById('n_foldertree'); if(!c)return;
   const root=`<div class="fp-row fp-root"><span class="fp-caret spacer">·</span><span class="fp-name">Projects <span style="color:var(--dim);font-weight:400;font-size:12px">~/Projects</span></span><button type="button" class="fp-add" data-act="add" data-path="" title="new folder under Projects">＋</button></div>`;
-  c.innerHTML=root + (renderLevel(buildTree(STATE.folders||[]), '', 0) || '<div style="color:var(--dim);font-size:12px;padding:10px">No project folders yet.</div>');
+  c.innerHTML=root + (renderLevel(buildTree(newHostFolders||STATE.folders||[]), '', 0) || '<div style="color:var(--dim);font-size:12px;padding:10px">No project folders yet.</div>');
   c.onclick=(e)=>{
     const el=e.target.closest('[data-act]'); if(!el)return;
     const act=el.dataset.act;
@@ -571,7 +593,7 @@ async function create(){
   const name=document.getElementById('n_name').value.trim(), err=document.getElementById('n_err'); err.textContent='';
   if(!name){err.textContent='Name is required';return;}
   if(!selectedFolder){err.textContent='Tap a folder to select it (or ＋ to create one)';return;}
-  const payload={name,folder:selectedFolder,startNow:document.getElementById('n_startnow').checked,autostart:document.getElementById('n_autostart').checked,remoteControl:document.getElementById('n_remote').checked,resume:document.getElementById('n_resume').checked,startClaude:document.getElementById('n_startnow').checked,vaultFolder:(document.getElementById('n_vault').value||'').trim()||null,group:(document.getElementById('n_group').value||'').trim()||null};
+  const payload={name,host:newHostId(),folder:selectedFolder,startNow:document.getElementById('n_startnow').checked,autostart:document.getElementById('n_autostart').checked,remoteControl:document.getElementById('n_remote').checked,resume:document.getElementById('n_resume').checked,startClaude:document.getElementById('n_startnow').checked,vaultFolder:(document.getElementById('n_vault').value||'').trim()||null,group:(document.getElementById('n_group').value||'').trim()||null};
   const r=await api('/instances','POST',payload);
   if(r.error){err.textContent=r.error;return;}
   await refresh(); selectInstance(r.name);

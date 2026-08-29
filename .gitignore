@@ -6,6 +6,7 @@ auth.json
 # --- runtime state (rewritten on every change; not source) --------------------
 instances.json
 commands.json
+hosts.json
 logs/
 
 # --- launchd stdout/stderr ----------------------------------------------------
@@ -19,3 +20,6 @@ server.err.log
 # --- build/derived ------------------------------------------------------------
 .DS_Store
 node_modules/
+
+# AI-review output artifact
+review_findings.json

@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "Where instances can run. The LOCAL host is detected at runtime by matching",
+    "`hostname`, so you can move this server to any host listed here without a",
+    "code change — that host simply stops being remote.",
+    "Remote hosts need: passwordless SSH from wherever Major Tom runs (the `ssh`",
+    "value is an alias from ~/.ssh/config), plus tmux, and ttyd/claude if you want",
+    "the browser terminal and Claude features there."
+  ],
+  "hosts": [
+    {
+      "id": "local", "label": "This Machine", "hostname": "my-laptop",
+      "ssh": null, "addr": "127.0.0.1",
+      "tmux": "/opt/homebrew/bin/tmux", "ttyd": "/opt/homebrew/bin/ttyd",
+      "projectsRoot": "/Users/you/Projects", "home": "/Users/you",
+      "enabled": true
+    },
+    {
+      "id": "dev", "label": "Dev Server", "hostname": "dev-box",
+      "ssh": "dev", "addr": "10.0.0.10",
+      "tmux": "/usr/bin/tmux", "ttyd": "/usr/bin/ttyd",
+      "projectsRoot": "/home/you/Projects", "home": "/home/you",
+      "enabled": true
+    }
+  ]
+}

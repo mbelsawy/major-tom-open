@@ -44,6 +44,42 @@ function run(cmd, args, opts = {}) {
   try { return { ok: true, out: execFileSync(cmd, args, { encoding: 'utf8', timeout: 8000, ...opts }).trim() }; }
   catch (e) { return { ok: false, out: (e.stdout || '').toString().trim(), err: (e.stderr || e.message || '').toString().trim() }; }
 }
+// ---- host registry --------------------------------------------------------
+// Instances can live on this machine or on any other host in hosts.json. The
+// LOCAL host is resolved at runtime by matching os.hostname(), so moving this
+// server to another host (e.g. sv4) needs no code change — that host simply
+// stops being remote and this one starts being remote.
+const HOSTS_FILE = join(__dirname, 'hosts.json');
+const SSH = '/usr/bin/ssh';
+const SSH_OPTS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=accept-new'];
+function loadHosts() {
+  try { return JSON.parse(readFileSync(HOSTS_FILE, 'utf8')).hosts || []; }
+  catch { return []; }
+}
+let HOSTS = loadHosts();
+const SELF_HOSTNAME = os.hostname().replace(/\.local$/, '');
+// Fallback keeps a single-host install working even with no hosts.json.
+const LOCAL_FALLBACK = { id: 'local', label: SELF_HOSTNAME, hostname: SELF_HOSTNAME, ssh: null,
+  addr: '127.0.0.1', tmux: TMUX, ttyd: TTYD, projectsRoot: PROJECTS_ROOT, home: HOME, enabled: true };
+const isLocal = (h) => !h.ssh || h.hostname === SELF_HOSTNAME;
+function hostById(id) {
+  if (!HOSTS.length) return LOCAL_FALLBACK;
+  return HOSTS.find((h) => h.id === id) || HOSTS.find((h) => h.hostname === SELF_HOSTNAME) || HOSTS[0];
+}
+const localHost = () => HOSTS.find((h) => h.hostname === SELF_HOSTNAME) || LOCAL_FALLBACK;
+const hostOf = (inst) => hostById(inst.host || localHost().id);
+
+// Run a command on a host: directly when local, over ssh when not. Remote args
+// are shell-quoted individually — ssh re-parses the command through a shell on
+// the far side, so an unquoted arg containing spaces would split.
+function hrun(host, cmd, args = [], opts = {}) {
+  if (isLocal(host)) return run(cmd, args, opts);
+  return run(SSH, [...SSH_OPTS, host.ssh, [cmd, ...args].map(shq).join(' ')], opts);
+}
+const tmuxOn = (host, ...args) => hrun(host, host.tmux || TMUX, args);
+const sessionExistsOn = (host, name) => tmuxOn(host, 'has-session', '-t', S(name)).ok;
+
+// Kept for the few call sites that are inherently local.
 const tmux = (...args) => run(TMUX, args);
 const sessionExists = (name) => tmux('has-session', '-t', S(name)).ok;
 function tsIP() { const r = run(TAILSCALE, ['ip', '-4']); return r.ok ? r.out.split('\n')[0].trim() : '0.0.0.0'; }
@@ -94,6 +130,8 @@ let state = loadState();
     if (!('group' in i)) { i.group = null; dirty = true; }
     if (!('archived' in i)) { i.archived = false; dirty = true; }
     if (!('resume' in i)) { i.resume = true; dirty = true; }
+    // Pre-multi-host instances all live on whatever machine this server runs on.
+    if (!('host' in i)) { i.host = localHost().id; dirty = true; }
     if (!i.updatedAt) { i.updatedAt = i.createdAt || new Date().toISOString(); dirty = true; }
   }
   if (dirty) saveState(state);
@@ -114,11 +152,11 @@ const CLAUDE_CMD_RE = /(^|\/)claude( |$)|\/claude\/versions\//i;
 // process on it belongs to that pane -- and Claude may sit anywhere in the tree:
 // it is the pane process when it exec'd over the shell, a child when the shell
 // stayed, and a grandchild under `claude rc`. One ps call per pane, not a walk.
-function claudeRunning(name) {
-  const r = tmux('list-panes', '-t', P(name), '-F', '#{pane_tty}');
+function claudeRunning(host, name) {
+  const r = tmuxOn(host, 'list-panes', '-t', P(name), '-F', '#{pane_tty}');
   if (!r.ok) return false;
   return r.out.split('\n').filter(Boolean).some((tty) => {
-    const ps = run('/bin/ps', ['-t', tty.replace(/^\/dev\//, ''), '-o', 'command=']);
+    const ps = hrun(host, '/bin/ps', ['-t', tty.replace(/^\/dev\//, ''), '-o', 'command=']);
     return ps.ok && ps.out.split('\n').some((c) => CLAUDE_CMD_RE.test(c.trim()));
   });
 }
@@ -128,11 +166,16 @@ function claudeRunning(name) {
 // on-disk transcript dir; if the encoding ever drifts we just fall back to a plain
 // launch, which is the safe direction to fail.
 const PROJECTS_HISTORY = join(HOME, '.claude', 'projects');
-function hasHistory(folder) {
-  try {
-    const dir = join(PROJECTS_HISTORY, String(folder).replace(/[^A-Za-z0-9]/g, '-'));
-    return existsSync(dir) && readdirSync(dir).some((f) => f.endsWith('.jsonl'));
-  } catch { return false; }
+function hasHistory(host, folder) {
+  const slug = String(folder).replace(/[^A-Za-z0-9]/g, '-');
+  if (isLocal(host)) {
+    try {
+      const dir = join(PROJECTS_HISTORY, slug);
+      return existsSync(dir) && readdirSync(dir).some((f) => f.endsWith('.jsonl'));
+    } catch { return false; }
+  }
+  const dir = `${host.home}/.claude/projects/${slug}`;
+  return hrun(host, '/bin/sh', ['-c', `ls ${shq(dir)}/*.jsonl >/dev/null 2>&1 && echo yes || echo no`]).out === 'yes';
 }
 
 // Claude's TUI needs an unpredictable time to come up - far longer on a cold boot
@@ -150,17 +193,17 @@ function hasHistory(folder) {
 // transcript against the usage limits (the dialog warns about exactly that).
 const RESUME_CHOOSER_RE = /Resume from summary|Resume full session/;
 const READY_RE = /^\s*\u276f\s*$/m;
-function whenClaudeReady(name, cb, tries = 90, answeredChooser = false) {
+function whenClaudeReady(host, name, cb, tries = 90, answeredChooser = false) {
   const again = (why, answered = answeredChooser) => {
     if (tries <= 0) return console.log(`claude never became ready (${why}):`, name);
-    setTimeout(() => whenClaudeReady(name, cb, tries - 1, answered), 1000);
+    setTimeout(() => whenClaudeReady(host, name, cb, tries - 1, answered), 1000);
   };
-  if (!claudeRunning(name)) return again('process');
-  const pane = tmux('capture-pane', '-pt', P(name)).out || '';
+  if (!claudeRunning(host, name)) return again('process');
+  const pane = tmuxOn(host, 'capture-pane', '-pt', P(name)).out || '';
   if (RESUME_CHOOSER_RE.test(pane)) {
     if (answeredChooser) return again('resume-chooser');      // answered once; let it settle
     console.log('answering resume chooser (summary):', name);
-    tmux('send-keys', '-t', P(name), 'Enter');
+    tmuxOn(host, 'send-keys', '-t', P(name), 'Enter');
     return again('resume-chooser', true);
   }
   if (!READY_RE.test(pane)) return again('tui');
@@ -172,25 +215,59 @@ const ttyds = new Map();
 function ttydPortFor(name) { const idx = state.instances.findIndex((i) => i.name === name); return TTYD_BASE_PORT + (idx < 0 ? state.instances.length : idx); }
 function startTtyd(name) {
   if (ttyds.has(name)) return ttyds.get(name);
+  const inst = findInst(name);
+  const host = inst ? hostOf(inst) : localHost();
   const port = ttydPortFor(name);
-  const proc = spawn(TTYD, ['-p', String(port), '-i', '127.0.0.1', '-b', `/term/${name}`, '-t', 'titleFixed=' + name, '-t', 'fontSize=15', '-W',
-    TMUX, 'attach', '-t', S(name)], { detached: true, stdio: 'ignore' });
-  proc.unref();
-  const rec = { port, proc, path: `/term/${name}/` };
+  const ttydArgs = (bind) => ['-p', String(port), '-i', bind, '-b', `/term/${name}`,
+    '-t', 'titleFixed=' + name, '-t', 'fontSize=15', '-W'];
+
+  if (isLocal(host)) {
+    const proc = spawn(host.ttyd || TTYD, [...ttydArgs('127.0.0.1'), host.tmux || TMUX, 'attach', '-t', S(name)],
+      { detached: true, stdio: 'ignore' });
+    proc.unref();
+    const rec = { port, proc, path: `/term/${name}/` };
+    ttyds.set(name, rec); return rec;
+  }
+
+  // Remote: start ttyd bound to the far side's LOOPBACK (never its LAN address —
+  // ttyd has no auth of its own; binding it to that host's LAN address would hand
+  // a shell to anyone on that subnet), then pull it over an ssh tunnel to our loopback,
+  // where the existing /term/<name> reverse proxy already inherits our auth.
+  const remoteCmd = [host.ttyd, ...ttydArgs('127.0.0.1'), host.tmux, 'attach', '-t', S(name)]
+    .map(shq).join(' ');
+  const rttyd = spawn(SSH, [...SSH_OPTS, host.ssh, `pkill -f ${shq('ttyd -p ' + port)} >/dev/null 2>&1; ${remoteCmd}`],
+    { detached: true, stdio: 'ignore' });
+  rttyd.unref();
+  const tunnel = spawn(SSH, [...SSH_OPTS, '-N', '-L', `127.0.0.1:${port}:127.0.0.1:${port}`, host.ssh],
+    { detached: true, stdio: 'ignore' });
+  tunnel.unref();
+  const rec = { port, proc: rttyd, tunnel, host: host.id, path: `/term/${name}/` };
   ttyds.set(name, rec);
   return rec;
 }
-function stopTtyd(name) { const t = ttyds.get(name); if (t) { try { process.kill(-t.proc.pid); } catch {} try { t.proc.kill(); } catch {} ttyds.delete(name); } }
+function stopTtyd(name) {
+  const t = ttyds.get(name); if (!t) return;
+  for (const pr of [t.proc, t.tunnel]) {
+    if (!pr) continue;
+    try { process.kill(-pr.pid); } catch {}
+    try { pr.kill(); } catch {}
+  }
+  // The ssh child dying does not necessarily reap ttyd on the far side.
+  if (t.host) { const h = hostById(t.host); if (h && !isLocal(h)) hrun(h, '/usr/bin/pkill', ['-f', `ttyd -p ${t.port}`]); }
+  ttyds.delete(name);
+}
 
 // ---- publish a port over the tailnet (TCP proxy BIND:port -> 127.0.0.1:port)
 const proxies = new Map();
 function publish(inst, port) {
   port = Number(port); if (!port) return { ok: false, err: 'invalid port' };
+  const host = hostOf(inst);
+  const target = isLocal(host) ? '127.0.0.1' : host.addr;   // where the app actually listens
   const key = `${inst.name}:${port}`;
   const url = `http://${tailnetHost()}:${port}/`;
   const record = () => { inst.publishedPorts = (inst.publishedPorts || []).filter((p) => p.port !== port).concat([{ port, url }]); saveState(state); };
   if (proxies.has(key)) { record(); return { ok: true, url }; }
-  const srv = net.createServer((sock) => { const up = net.connect(port, '127.0.0.1'); const end = () => { sock.destroy(); up.destroy(); }; sock.on('error', end); up.on('error', end); sock.pipe(up); up.pipe(sock); });
+  const srv = net.createServer((sock) => { const up = net.connect(port, target); const end = () => { sock.destroy(); up.destroy(); }; sock.on('error', end); up.on('error', end); sock.pipe(up); up.pipe(sock); });
   srv.on('error', (e) => { proxies.delete(key); if (e.code === 'EADDRINUSE') record(); });
   srv.listen(port, BIND, () => { proxies.set(key, srv); record(); });
   return { ok: true, url };
@@ -199,7 +276,8 @@ function unpublish(inst, port) { port = Number(port); const key = `${inst.name}:
 
 // ---- pre-trust folder so Claude skips its trust dialog --------------------
 const CLAUDE_JSON = join(HOME, '.claude.json');
-function trustFolder(dir) {
+function trustFolder(host, dir) {
+  if (host && !isLocal(host)) return trustFolderRemote(host, dir);
   try {
     if (!existsSync(CLAUDE_JSON)) return;
     const d = JSON.parse(readFileSync(CLAUDE_JSON, 'utf8'));
@@ -210,23 +288,49 @@ function trustFolder(dir) {
     const tmp = `${CLAUDE_JSON}.cc-tmp`; writeFileSync(tmp, JSON.stringify(d, null, 2)); renameSync(tmp, CLAUDE_JSON);
   } catch (e) { console.log('trustFolder error:', e.message); }
 }
+// Same pre-trust on a remote host. node isn't guaranteed there, so this is done
+// with python3 (present on every Ubuntu image we target).
+function trustFolderRemote(host, dir) {
+  const py = [
+    'import json,os,sys',
+    `p=os.path.expanduser('~/.claude.json'); d=${'{}'}`,
+    "d=json.load(open(p)) if os.path.exists(p) else {}",
+    "d.setdefault('projects',{})",
+    "cur=d['projects'].get(sys.argv[1],{})",
+    "cur['hasTrustDialogAccepted']=True",
+    "cur.setdefault('allowedTools',[])",
+    "cur['projectOnboardingSeenCount']=max(1,cur.get('projectOnboardingSeenCount',0))",
+    "d['projects'][sys.argv[1]]=cur",
+    "open(p+'.tmp','w').write(json.dumps(d,indent=2)); os.replace(p+'.tmp',p)",
+  ].join('\n');
+  const r = hrun(host, '/usr/bin/python3', ['-c', py, dir]);
+  if (!r.ok) console.log('trustFolderRemote error:', host.id, r.err || r.out);
+}
 
 // ---- lifecycle ------------------------------------------------------------
 function powerOn(inst) {
-  if (!existsSync(inst.folder)) mkdirSync(inst.folder, { recursive: true });
-  trustFolder(inst.folder);
-  if (!sessionExists(inst.name)) tmux('new-session', '-d', '-s', inst.name, '-c', inst.folder);
+  const host = hostOf(inst);
+  if (isLocal(host)) { if (!existsSync(inst.folder)) mkdirSync(inst.folder, { recursive: true }); }
+  else hrun(host, '/bin/mkdir', ['-p', inst.folder]);
+  trustFolder(host, inst.folder);
+  if (!sessionExistsOn(host, inst.name)) tmuxOn(host, 'new-session', '-d', '-s', inst.name, '-c', inst.folder);
   if (!inst.startClaude) return;
-  if (claudeRunning(inst.name)) return;     // idempotent: never stack a second claude
-  const vault = inst.vaultFolder ? join(VAULT_BASE, inst.vaultFolder) : null;
-  if (vault) trustFolder(vault);           // so Claude can access the vault without a prompt
+  if (claudeRunning(host, inst.name)) return;     // idempotent: never stack a second claude
+  // The vault lives on the Mac only; remote hosts get no --add-dir.
+  const vault = (isLocal(host) && inst.vaultFolder) ? join(VAULT_BASE, inst.vaultFolder) : null;
+  if (vault) trustFolder(host, vault);     // so Claude can access the vault without a prompt
   // `resume` is a per-instance choice honoured on EVERY power-on, not just at boot.
-  const base = (inst.resume !== false && hasHistory(inst.folder)) ? 'claude --continue' : 'claude';
+  const base = (inst.resume !== false && hasHistory(host, inst.folder)) ? 'claude --continue' : 'claude';
   const launch = vault ? `${base} --add-dir ${shq(vault)}` : base;
-  tmux('send-keys', '-t', P(inst.name), launch, 'Enter');
-  if (inst.remoteControl) whenClaudeReady(inst.name, () => remoteControl(inst.name, true));
+  tmuxOn(host, 'send-keys', '-t', P(inst.name), launch, 'Enter');
+  if (inst.remoteControl) whenClaudeReady(host, inst.name, () => remoteControl(host, inst.name, true));
 }
-function powerOff(inst) { stopTtyd(inst.name); for (const p of inst.publishedPorts || []) unpublish(inst, p.port); tmux('kill-session', '-t', S(inst.name)); }
+function powerOff(inst) {
+  const host = hostOf(inst);
+  stopTtyd(inst.name);
+  for (const p of inst.publishedPorts || []) unpublish(inst, p.port);
+  tmuxOn(host, 'kill-session', '-t', S(inst.name));
+}
 
 // Turn remote-control ON (enable + label) or OFF (dismiss the confirm dialog).
 // OFF: `/remote-control` opens a menu (❯ Continue by default) — navigate Up,Up to
@@ -238,27 +342,29 @@ function powerOff(inst) { stopTtyd(inst.name); for (const p of inst.publishedPor
 // dialog's own labelled "continue" action and, unlike Enter, cannot activate a
 // different row if the highlight has moved.
 const RC_DIALOG_RE = /Show QR code|Scan with your phone/;
-function dismissRemoteDialog(name, tries = 30) {
-  if (RC_DIALOG_RE.test(tmux('capture-pane', '-pt', P(name)).out || '')) {
-    tmux('send-keys', '-t', P(name), 'Escape');
+function dismissRemoteDialog(host, name, tries = 30) {
+  if (RC_DIALOG_RE.test(tmuxOn(host, 'capture-pane', '-pt', P(name)).out || '')) {
+    tmuxOn(host, 'send-keys', '-t', P(name), 'Escape');
     return;
   }
   if (tries <= 0) return console.log('remote-control dialog never appeared:', name);
-  setTimeout(() => dismissRemoteDialog(name, tries - 1), 1000);
+  setTimeout(() => dismissRemoteDialog(host, name, tries - 1), 1000);
 }
-function remoteControl(name, on) {
+function remoteControl(host, name, on) {
   const t = P(name);
-  if (on) { tmux('send-keys', '-t', t, `/remote-control ${name}`, 'Enter'); return dismissRemoteDialog(name); }
-  tmux('send-keys', '-t', t, '/remote-control', 'Enter');
-  setTimeout(() => tmux('send-keys', '-t', t, 'Up'), 1500);
-  setTimeout(() => tmux('send-keys', '-t', t, 'Up'), 2000);
-  setTimeout(() => tmux('send-keys', '-t', t, 'Enter'), 2500);
+  if (on) { tmuxOn(host, 'send-keys', '-t', t, `/remote-control ${name}`, 'Enter'); return dismissRemoteDialog(host, name); }
+  tmuxOn(host, 'send-keys', '-t', t, '/remote-control', 'Enter');
+  setTimeout(() => tmuxOn(host, 'send-keys', '-t', t, 'Up'), 1500);
+  setTimeout(() => tmuxOn(host, 'send-keys', '-t', t, 'Up'), 2000);
+  setTimeout(() => tmuxOn(host, 'send-keys', '-t', t, 'Enter'), 2500);
 }
 
 // List folders under ~/Projects INCLUDING nested subfolders (depth-limited,
 // skipping heavy/noise dirs). Symlinks are skipped (avoids loops). Local disk → fast.
 const SKIP_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'out', '.output', '.venv', 'venv', 'env', '__pycache__', '.cache', '.turbo', 'coverage', 'vendor', 'target', '.svelte-kit', '.nuxt', '.pytest_cache', '.mypy_cache', '.gradle', 'Pods', '.idea', '.vscode']);
-function listProjectFolders(maxDepth = 3, cap = 1000) {
+function listProjectFolders(hostId, maxDepth = 3, cap = 1000) {
+  const host = hostById(hostId || localHost().id);
+  if (!isLocal(host)) return listProjectFoldersRemote(host, maxDepth, cap);
   const out = [];
   const walk = (rel, depth) => {
     if (depth > maxDepth || out.length >= cap) return;
@@ -272,6 +378,15 @@ function listProjectFolders(maxDepth = 3, cap = 1000) {
   };
   walk('', 1);
   return out.sort();
+}
+// Remote equivalent: one `find` instead of a round-trip per directory.
+function listProjectFoldersRemote(host, maxDepth = 3, cap = 1000) {
+  const prune = [...SKIP_DIRS].map((d) => `-name ${shq(d)}`).join(' -o ');
+  const cmd = `cd ${shq(host.projectsRoot)} 2>/dev/null && find . -mindepth 1 -maxdepth ${maxDepth} ` +
+    `\\( ${prune} -o -name '.*' \\) -prune -o -type d -print 2>/dev/null | head -n ${cap}`;
+  const r = hrun(host, '/bin/sh', ['-c', cmd]);
+  if (!r.ok) return [];
+  return r.out.split('\n').filter(Boolean).map((l) => l.replace(/^\.\//, '')).sort();
 }
 // The vault is on iCloud. A launchd agent's SYNC iCloud read can block forever
 // (CloudDocs), freezing the event loop — so scan ASYNC (libuv threadpool), cache
@@ -307,22 +422,27 @@ function runAttachment(inst, att, { manual = false } = {}) {
   const cmd = findCmd(att.commandId);
   const stamp = (status, extra = {}) => { att.lastRun = { at: new Date().toISOString(), status, ...extra }; saveState(state); return status; };
   if (!cmd) return stamp('error: command was deleted');
-  const running = sessionExists(inst.name);
+  const host = hostOf(inst);
+  const running = sessionExistsOn(host, inst.name);
   const headless = cmd.kind === 'claude' && cmd.runMode === 'headless';
   if (!running && !(manual && headless)) return stamp('skipped (instance off)');   // scheduled+off, or live/shell needs session
 
-  if (cmd.kind === 'shell') { tmux('send-keys', '-t', P(inst.name), cmd.text, 'Enter'); return stamp('sent (shell)'); }
-  if (cmd.runMode === 'live') { tmux('send-keys', '-t', P(inst.name), cmd.text, 'Enter'); return stamp('sent (live session)'); }
+  if (cmd.kind === 'shell') { tmuxOn(hostOf(inst), 'send-keys', '-t', P(inst.name), cmd.text, 'Enter'); return stamp('sent (shell)'); }
+  if (cmd.runMode === 'live') { tmuxOn(hostOf(inst), 'send-keys', '-t', P(inst.name), cmd.text, 'Enter'); return stamp('sent (live session)'); }
 
   // headless: claude -p, autonomous, logged
   const perm = cmd.permission === 'full' ? 'bypassPermissions' : 'acceptEdits';
   const args = ['-p', cmd.text, '--permission-mode', perm];
-  if (inst.vaultFolder) args.push('--add-dir', join(VAULT_BASE, inst.vaultFolder));
+  if (inst.vaultFolder && isLocal(host)) args.push('--add-dir', join(VAULT_BASE, inst.vaultFolder));
   try {
     mkdirSync(LOG_DIR, { recursive: true });
     const logPath = join(LOG_DIR, `${inst.name}-${att.attachId}-${Date.now()}.log`);
     const fd = openSync(logPath, 'a');
-    const child = spawn(CLAUDE_BIN, args, { cwd: inst.folder, detached: true, stdio: ['ignore', fd, fd] });
+    // Remote hosts run claude over ssh; the log still lands here so the UI can read it.
+    const [bin, binArgs] = isLocal(host)
+      ? [CLAUDE_BIN, args]
+      : [SSH, [...SSH_OPTS, host.ssh, `cd ${shq(inst.folder)} && ${[`${host.home}/.local/bin/claude`, ...args].map(shq).join(' ')}`]];
+    const child = spawn(bin, binArgs, { cwd: isLocal(host) ? inst.folder : undefined, detached: true, stdio: ['ignore', fd, fd] });
     child.on('exit', (code) => { att.lastRun = { at: new Date().toISOString(), status: code === 0 ? 'ok (headless)' : `error (exit ${code})`, log: logPath }; saveState(state); });
     child.unref();
     return stamp('running (headless)…', { log: logPath });
@@ -343,7 +463,7 @@ function schedulerTick() {
     runAttachment(inst, att, { manual: false });
   } }
 }
-function view(inst) { const running = sessionExists(inst.name); return { ...inst, running, claudeRunning: running ? claudeRunning(inst.name) : false, ttydPath: ttyds.has(inst.name) ? `/term/${inst.name}/` : null }; }
+function view(inst) { const running = sessionExists(inst.name); return { ...inst, running, claudeRunning: running ? claudeRunning(host, inst.name) : false, hostId: host.id, hostLabel: host.label, ttydPath: ttyds.has(inst.name) ? `/term/${inst.name}/` : null }; }
 
 // ---- HTTP -----------------------------------------------------------------
 function body(req) { return new Promise((res) => { let d = ''; req.on('data', (c) => (d += c)); req.on('end', () => { try { res(d ? JSON.parse(d) : {}); } catch { res({}); } }); }); }
@@ -365,7 +485,8 @@ const server = http.createServer(async (req, res) => {
   // --- ttyd reverse proxy (authed) ---
   if (p.startsWith('/term/')) {
     const name = p.split('/')[2];
-    if (!findInst(name) || !sessionExists(name)) { res.writeHead(404); return res.end('instance not running'); }
+    const ti = findInst(name);
+    if (!ti || !sessionExistsOn(hostOf(ti), name)) { res.writeHead(404); return res.end('instance not running'); }
     const rec = startTtyd(name);
     const pr = http.request({ host: '127.0.0.1', port: rec.port, path: req.url, method: m, headers: req.headers }, (up) => { res.writeHead(up.statusCode, up.headers); up.pipe(res); });
     pr.on('error', () => { res.writeHead(502); res.end('bad gateway'); });
@@ -373,7 +494,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   // --- API ---
-  if (p === '/api/state') return j(res, 200, { host: tailnetHost(), bind: BIND, projectsRoot: PROJECTS_ROOT, folders: listProjectFolders(), vaultBase: VAULT_BASE, vaultFolders: vaultFoldersCache, commandsLibrary: commands, instances: state.instances.map(view) });
+  if (p === '/api/state') {
+    const hostId = url.searchParams.get('host') || localHost().id;
+    const h = hostById(hostId);
+    return j(res, 200, { host: tailnetHost(), bind: BIND, projectsRoot: h.projectsRoot, folders: listProjectFolders(hostId),
+      hosts: HOSTS.filter((x) => x.enabled !== false).map((x) => ({ id: x.id, label: x.label, local: isLocal(x) })),
+      selfHost: localHost().id, vaultBase: VAULT_BASE, vaultFolders: vaultFoldersCache,
+      commandsLibrary: commands, instances: state.instances.map(view) });
+  }
   if (p === '/api/mkdir' && m === 'POST') { const b = await body(req); const rel = String(b.path || '').replace(/\.\./g, '').replace(/^\/+/, '').trim(); if (!rel) return j(res, 400, { error: 'path required' }); const abs = resolve(PROJECTS_ROOT, rel); if (!abs.startsWith(PROJECTS_ROOT)) return j(res, 400, { error: 'path must be under Projects' }); try { mkdirSync(abs, { recursive: true }); return j(res, 200, { ok: true, path: rel }); } catch (e) { return j(res, 500, { error: e.message }); } }
   if (p === '/api/commands' && m === 'GET') return j(res, 200, commands);
   if (p === '/api/commands' && m === 'POST') { const b = await body(req); if (!b.name || !b.text) return j(res, 400, { error: 'name and text required' }); const c = { id: uid(), name: String(b.name), kind: b.kind === 'shell' ? 'shell' : 'claude', text: String(b.text), runMode: b.runMode === 'live' ? 'live' : 'headless', permission: b.permission === 'full' ? 'full' : 'acceptEdits', createdAt: new Date().toISOString() }; commands.push(c); saveCommands(); return j(res, 200, c); }
@@ -383,10 +511,12 @@ const server = http.createServer(async (req, res) => {
     const b = await body(req); const name = sanitize(b.name);
     if (!name) return j(res, 400, { error: 'name required' });
     if (findInst(name)) return j(res, 409, { error: 'instance exists' });
-    const folder = b.newFolder ? join(PROJECTS_ROOT, name) : (b.folder ? resolve(PROJECTS_ROOT, b.folder) : join(PROJECTS_ROOT, name));
-    if (!folder.startsWith(PROJECTS_ROOT)) return j(res, 400, { error: 'folder must be under Projects' });
+    const h = HOSTS.find((x) => x.id === b.host) || localHost();
+    const root = h.projectsRoot;
+    const folder = b.newFolder ? `${root}/${name}` : (b.folder ? resolve(root, b.folder) : `${root}/${name}`);
+    if (!folder.startsWith(root)) return j(res, 400, { error: 'folder must be under Projects' });
     const now = new Date().toISOString();
-    const inst = { name, folder, autostart: !!b.autostart, remoteControl: !!b.remoteControl, startClaude: b.startClaude !== false, resume: b.resume !== false, vaultFolder: b.vaultFolder || null, group: groupName(b.group), archived: false, commands: [], publishedPorts: [], createdAt: now, updatedAt: now };
+    const inst = { name, folder, host: h.id, autostart: !!b.autostart, remoteControl: !!b.remoteControl, startClaude: b.startClaude !== false, resume: b.resume !== false, vaultFolder: b.vaultFolder || null, group: groupName(b.group), archived: false, commands: [], publishedPorts: [], createdAt: now, updatedAt: now };
     state.instances.push(inst); saveState(state);
     if (b.startNow) powerOn(inst);
     return j(res, 200, view(inst));
@@ -414,15 +544,20 @@ const server = http.createServer(async (req, res) => {
     if (action === '/group' && m === 'POST') { const b = await body(req); inst.group = groupName(b.group); touch(inst); saveState(state); return j(res, 200, view(inst)); }
     // Archiving parks an instance out of the main list. A running one is powered off
     // first, otherwise a hidden tmux session would keep running with no way to reach it.
-    if (action === '/archive' && m === 'POST') { const b = await body(req); inst.archived = !!b.on; if (inst.archived && sessionExists(inst.name)) powerOff(inst); touch(inst); saveState(state); return j(res, 200, view(inst)); }
-    if (action === '/send' && m === 'POST') { const b = await body(req); tmux('send-keys', '-t', P(inst.name), String(b.keys ?? ''), 'Enter'); return j(res, 200, { ok: true }); }
-    if (action === '/exit-claude' && m === 'POST') { tmux('send-keys', '-t', P(inst.name), '/exit', 'Enter'); return j(res, 200, { ok: true }); }
-    if (action === '/remote-control' && m === 'POST') { const b = await body(req); inst.remoteControl = !!b.on; touch(inst); saveState(state); if (sessionExists(inst.name)) remoteControl(inst.name, !!b.on); return j(res, 200, view(inst)); }
+    if (action === '/archive' && m === 'POST') { const b = await body(req); inst.archived = !!b.on; if (inst.archived && sessionExistsOn(hostOf(inst), inst.name)) powerOff(inst); touch(inst); saveState(state); return j(res, 200, view(inst)); }
+    if (action === '/send' && m === 'POST') { const b = await body(req); tmuxOn(hostOf(inst), 'send-keys', '-t', P(inst.name), String(b.keys ?? ''), 'Enter'); return j(res, 200, { ok: true }); }
+    if (action === '/exit-claude' && m === 'POST') { tmuxOn(hostOf(inst), 'send-keys', '-t', P(inst.name), '/exit', 'Enter'); return j(res, 200, { ok: true }); }
+    if (action === '/remote-control' && m === 'POST') { const b = await body(req); inst.remoteControl = !!b.on; touch(inst); saveState(state); if (sessionExistsOn(hostOf(inst), inst.name)) remoteControl(hostOf(inst), inst.name, !!b.on); return j(res, 200, view(inst)); }
+    // Moving hosts is only safe while stopped: the tmux session lives on the old host.
+    if (action === '/host' && m === 'POST') { const b = await body(req);
+      if (sessionExistsOn(hostOf(inst), inst.name)) return j(res, 400, { error: 'power the instance off before moving it' });
+      const h = HOSTS.find((x) => x.id === b.host); if (!h) return j(res, 400, { error: 'unknown host' });
+      inst.host = h.id; touch(inst); saveState(state); return j(res, 200, view(inst)); }
     if (action === '/resume' && m === 'POST') { const b = await body(req); inst.resume = !!b.on; touch(inst); saveState(state); return j(res, 200, view(inst)); }
     if (action === '/autostart' && m === 'POST') { const b = await body(req); inst.autostart = !!b.on; touch(inst); saveState(state); return j(res, 200, view(inst)); }
     if (action === '/vault' && m === 'POST') { const b = await body(req); inst.vaultFolder = b.folder || null; touch(inst); saveState(state); return j(res, 200, view(inst)); }
-    if (action === '/terminal' && m === 'POST') { if (!sessionExists(inst.name)) return j(res, 400, { error: 'instance not running' }); const r = startTtyd(inst.name); return j(res, 200, { path: r.path }); }
-    if (action === '/output' && m === 'GET') { const r = tmux('capture-pane', '-pt', P(inst.name)); return j(res, 200, { output: r.out || '(no output / not running)' }); }
+    if (action === '/terminal' && m === 'POST') { if (!sessionExistsOn(hostOf(inst), inst.name)) return j(res, 400, { error: 'instance not running' }); const r = startTtyd(inst.name); return j(res, 200, { path: r.path }); }
+    if (action === '/output' && m === 'GET') { const r = tmuxOn(hostOf(inst), 'capture-pane', '-pt', P(inst.name)); return j(res, 200, { output: r.out || '(no output / not running)' }); }
     if (action === '/publish' && m === 'POST') { const b = await body(req); return j(res, 200, publish(inst, b.port)); }
     if (action === '/publish' && m === 'DELETE') { const b = await body(req); unpublish(inst, b.port); return j(res, 200, { ok: true }); }
   }
@@ -460,7 +595,8 @@ server.on('upgrade', (req, socket, head) => {
 function reconcile() {
   for (const inst of state.instances) {
     if (!inst.autostart || inst.archived) continue;
-    if (sessionExists(inst.name) && (!inst.startClaude || claudeRunning(inst.name))) continue;
+    const host = hostOf(inst);
+    if (sessionExistsOn(host, inst.name) && (!inst.startClaude || claudeRunning(host, inst.name))) continue;
     console.log('autostart:', inst.name);
     powerOn(inst);
   }

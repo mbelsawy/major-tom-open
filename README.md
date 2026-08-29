@@ -10,8 +10,15 @@ drop into a real terminal, or expose a dev server's port — without touching yo
 Zero npm dependencies. The backend is one Node file using only built-ins; the UI is one
 HTML file.
 
-<!-- TODO: screenshot goes here — a phone shot of the instance list plus one detail view
-     does more for this README than any paragraph above it. -->
+<p align="center">
+  <img src="assets/desktop.png" alt="Major Tom — instance list and detail view" width="100%">
+</p>
+
+<p align="center">
+  <img src="assets/phone-list.png" alt="Instance list on a phone, grouped" width="32%">
+  &nbsp;
+  <img src="assets/phone-detail.png" alt="Instance detail on a phone: power, auto-start, remote control and resume toggles" width="32%">
+</p>
 
 ---
 
@@ -35,6 +42,7 @@ reachable, and the panel makes them operable from a 6-inch screen.
 | **Publish ports** | Expose `localhost:3000` on your tailnet and get a URL you can open on your phone. |
 | **Scheduled commands** | Attach saved commands to instances and run them on a schedule, live in the session or headless via `claude -p`. |
 | **Boot recovery** | Instances flagged auto-start come back after a reboot, relaunch Claude, and reconnect remote control. |
+| **Multi-host** | Run each instance on whichever machine suits it — this one, or any host in `hosts.json` reached over SSH. Browser terminals tunnel back over SSH so `ttyd` never listens on a remote LAN address. |
 
 ## Requirements
 
