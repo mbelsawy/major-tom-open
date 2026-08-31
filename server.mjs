@@ -192,7 +192,19 @@ function hasHistory(host, folder) {
 // every instance at once, and "resume full session" would replay each full
 // transcript against the usage limits (the dialog warns about exactly that).
 const RESUME_CHOOSER_RE = /Resume from summary|Resume full session/;
-const READY_RE = /^\s*\u276f\s*$/m;
+// "Ready" is the input BOX, identified structurally: a prompt line sitting
+// directly under the box's horizontal rule. Matching the prompt line's CONTENT
+// does not work — a resumed session shows an empty prompt, but a brand-new one
+// shows placeholder hint text (`> Try "fix lint errors"`), and both menus draw
+// prompt rows of their own. Requiring an empty prompt silently broke every NEW
+// instance: readiness never fired, so /remote-control was never sent and Claude
+// fell back to auto-naming the session <hostname>-<random-words>.
+const PROMPT_RE = /^\s*\u276f/;
+const RULE_RE = /^\s*\u2500{10,}/;
+function isTuiReady(pane) {
+  const lines = pane.split('\n');
+  return lines.some((l, i) => PROMPT_RE.test(l) && i > 0 && RULE_RE.test(lines[i - 1]));
+}
 function whenClaudeReady(host, name, cb, tries = 90, answeredChooser = false) {
   const again = (why, answered = answeredChooser) => {
     if (tries <= 0) return console.log(`claude never became ready (${why}):`, name);
@@ -206,7 +218,7 @@ function whenClaudeReady(host, name, cb, tries = 90, answeredChooser = false) {
     tmuxOn(host, 'send-keys', '-t', P(name), 'Enter');
     return again('resume-chooser', true);
   }
-  if (!READY_RE.test(pane)) return again('tui');
+  if (!isTuiReady(pane)) return again('tui');
   setTimeout(cb, 400);   // settle, so the first keystroke isn't eaten mid-render
 }
 
@@ -463,7 +475,7 @@ function schedulerTick() {
     runAttachment(inst, att, { manual: false });
   } }
 }
-function view(inst) { const running = sessionExists(inst.name); return { ...inst, running, claudeRunning: running ? claudeRunning(host, inst.name) : false, hostId: host.id, hostLabel: host.label, ttydPath: ttyds.has(inst.name) ? `/term/${inst.name}/` : null }; }
+function view(inst) { const host = hostOf(inst); const running = sessionExistsOn(host, inst.name); return { ...inst, running, claudeRunning: running ? claudeRunning(host, inst.name) : false, hostId: host.id, hostLabel: host.label, ttydPath: ttyds.has(inst.name) ? `/term/${inst.name}/` : null }; }
 
 // ---- HTTP -----------------------------------------------------------------
 function body(req) { return new Promise((res) => { let d = ''; req.on('data', (c) => (d += c)); req.on('end', () => { try { res(d ? JSON.parse(d) : {}); } catch { res({}); } }); }); }
