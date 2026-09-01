@@ -247,7 +247,10 @@ function startTtyd(name) {
   // where the existing /term/<name> reverse proxy already inherits our auth.
   const remoteCmd = [host.ttyd, ...ttydArgs('127.0.0.1'), host.tmux, 'attach', '-t', S(name)]
     .map(shq).join(' ');
-  const rttyd = spawn(SSH, [...SSH_OPTS, host.ssh, `pkill -f ${shq('ttyd -p ' + port)} >/dev/null 2>&1; ${remoteCmd}`],
+  // Free the port by SOCKET, never by command-line pattern: `pkill -f "ttyd -p N"`
+  // also matches the ssh shell that carries that same text, so it killed itself
+  // before ttyd ever bound — the tunnel then forwarded to nothing (502).
+  const rttyd = spawn(SSH, [...SSH_OPTS, host.ssh, `fuser -k -n tcp ${port} >/dev/null 2>&1; ${remoteCmd}`],
     { detached: true, stdio: 'ignore' });
   rttyd.unref();
   const tunnel = spawn(SSH, [...SSH_OPTS, '-N', '-L', `127.0.0.1:${port}:127.0.0.1:${port}`, host.ssh],
@@ -265,7 +268,7 @@ function stopTtyd(name) {
     try { pr.kill(); } catch {}
   }
   // The ssh child dying does not necessarily reap ttyd on the far side.
-  if (t.host) { const h = hostById(t.host); if (h && !isLocal(h)) hrun(h, '/usr/bin/pkill', ['-f', `ttyd -p ${t.port}`]); }
+  if (t.host) { const h = hostById(t.host); if (h && !isLocal(h)) hrun(h, '/usr/bin/fuser', ['-k', '-n', 'tcp', String(t.port)]); }
   ttyds.delete(name);
 }
 
@@ -514,7 +517,22 @@ const server = http.createServer(async (req, res) => {
       selfHost: localHost().id, vaultBase: VAULT_BASE, vaultFolders: vaultFoldersCache,
       commandsLibrary: commands, instances: state.instances.map(view) });
   }
-  if (p === '/api/mkdir' && m === 'POST') { const b = await body(req); const rel = String(b.path || '').replace(/\.\./g, '').replace(/^\/+/, '').trim(); if (!rel) return j(res, 400, { error: 'path required' }); const abs = resolve(PROJECTS_ROOT, rel); if (!abs.startsWith(PROJECTS_ROOT)) return j(res, 400, { error: 'path must be under Projects' }); try { mkdirSync(abs, { recursive: true }); return j(res, 200, { ok: true, path: rel }); } catch (e) { return j(res, 500, { error: e.message }); } }
+  if (p === '/api/mkdir' && m === 'POST') {
+    const b = await body(req);
+    const rel = String(b.path || '').replace(/\.\./g, '').replace(/^\/+/, '').trim();
+    if (!rel) return j(res, 400, { error: 'path required' });
+    const h = HOSTS.find((x) => x.id === b.host) || localHost();
+    const root = h.projectsRoot;
+    const abs = resolve(root, rel);
+    if (!abs.startsWith(root)) return j(res, 400, { error: 'path must be under Projects' });
+    if (isLocal(h)) {
+      try { mkdirSync(abs, { recursive: true }); } catch (e) { return j(res, 500, { error: e.message }); }
+    } else {
+      const r = hrun(h, '/bin/mkdir', ['-p', abs]);
+      if (!r.ok) return j(res, 500, { error: r.err || 'mkdir failed on ' + h.id });
+    }
+    return j(res, 200, { ok: true, path: rel, host: h.id });
+  }
   if (p === '/api/commands' && m === 'GET') return j(res, 200, commands);
   if (p === '/api/commands' && m === 'POST') { const b = await body(req); if (!b.name || !b.text) return j(res, 400, { error: 'name and text required' }); const c = { id: uid(), name: String(b.name), kind: b.kind === 'shell' ? 'shell' : 'claude', text: String(b.text), runMode: b.runMode === 'live' ? 'live' : 'headless', permission: b.permission === 'full' ? 'full' : 'acceptEdits', createdAt: new Date().toISOString() }; commands.push(c); saveCommands(); return j(res, 200, c); }
   const mCmdDel = p.match(/^\/api\/commands\/([^/]+)$/);

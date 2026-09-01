@@ -575,9 +575,12 @@ async function addFolder(parent){
   const nm=prompt(`New folder name ${parent?`inside "${parent}"`:'under Projects'}:`); if(nm===null)return;
   const clean=nm.trim().replace(/[\/\\]/g,'').replace(/^\.+/,''); if(!clean)return;
   const path=parent?`${parent}/${clean}`:clean;
-  const r=await api('/mkdir','POST',{path});
+  // Create it on the host this instance will run on, not always the local one.
+  const r=await api('/mkdir','POST',{path,host:newHostId()});
   if(r.error){ alert('Could not create folder: '+r.error); return; }
-  await refresh(); renderFolderTree(); selectedFolder=r.path||path; revealSelected(); updateFolderSel();
+  // Re-list from that same host — refresh() only ever returns the local tree.
+  try{ const d=await api(`/state?host=${encodeURIComponent(newHostId())}`); newHostFolders=d.folders||[]; }catch{}
+  renderFolderTree(); selectedFolder=r.path||path; revealSelected(); updateFolderSel();
 }
 function revealSelected(){
   const c=document.getElementById('n_foldertree'); if(!c||!selectedFolder)return;
