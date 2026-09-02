@@ -335,10 +335,19 @@ function powerOn(inst) {
   const vault = (isLocal(host) && inst.vaultFolder) ? join(VAULT_BASE, inst.vaultFolder) : null;
   if (vault) trustFolder(host, vault);     // so Claude can access the vault without a prompt
   // `resume` is a per-instance choice honoured on EVERY power-on, not just at boot.
-  const base = (inst.resume !== false && hasHistory(host, inst.folder)) ? 'claude --continue' : 'claude';
-  const launch = vault ? `${base} --add-dir ${shq(vault)}` : base;
-  tmuxOn(host, 'send-keys', '-t', P(inst.name), launch, 'Enter');
-  if (inst.remoteControl) whenClaudeReady(host, inst.name, () => remoteControl(host, inst.name, true));
+  const resuming = inst.resume !== false && hasHistory(host, inst.folder);
+  const parts = ['claude'];
+  if (resuming) parts.push('--continue');
+  // Name Remote Control at LAUNCH. Typing `/remote-control <name>` afterwards
+  // enables RC but does not take the name — Claude falls back to its
+  // auto-generated `<hostname>-<random-words>`, which is where names like
+  // `myhost-snazzy-lynx` and `sv4-dev-tender-matsumoto` came from. The launch
+  // flag also removes the whole TUI-timing dance: no readiness poll, no dialog.
+  if (inst.remoteControl) parts.push('--remote-control', shq(inst.name));
+  if (vault) parts.push('--add-dir', shq(vault));
+  tmuxOn(host, 'send-keys', '-t', P(inst.name), parts.join(' '), 'Enter');
+  // Only a resume can stall on the "resume from summary?" chooser; answer it.
+  if (resuming) whenClaudeReady(host, inst.name, () => {});
 }
 function powerOff(inst) {
   const host = hostOf(inst);
