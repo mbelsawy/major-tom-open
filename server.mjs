@@ -331,22 +331,22 @@ function powerOn(inst) {
   if (!sessionExistsOn(host, inst.name)) tmuxOn(host, 'new-session', '-d', '-s', inst.name, '-c', inst.folder);
   if (!inst.startClaude) return;
   if (claudeRunning(host, inst.name)) return;     // idempotent: never stack a second claude
-  // The vault lives on the Mac only; remote hosts get no --add-dir.
+  launchClaude(host, inst);
+}
+// Build and send the claude launch command. Remote Control MUST be named here:
+// typing `/remote-control <name>` after startup enables RC but does NOT apply the
+// name — Claude falls back to its auto-generated `<hostname>-<random-words>`
+// (e.g. <hostname>-snazzy-lynx). The launch flag is the only
+// path that names the session, and it also avoids the TUI-timing dance.
+function launchClaude(host, inst, { forceContinue = false } = {}) {
   const vault = (isLocal(host) && inst.vaultFolder) ? join(VAULT_BASE, inst.vaultFolder) : null;
-  if (vault) trustFolder(host, vault);     // so Claude can access the vault without a prompt
-  // `resume` is a per-instance choice honoured on EVERY power-on, not just at boot.
-  const resuming = inst.resume !== false && hasHistory(host, inst.folder);
+  if (vault) trustFolder(host, vault);
+  const resuming = forceContinue || (inst.resume !== false && hasHistory(host, inst.folder));
   const parts = ['claude'];
   if (resuming) parts.push('--continue');
-  // Name Remote Control at LAUNCH. Typing `/remote-control <name>` afterwards
-  // enables RC but does not take the name — Claude falls back to its
-  // auto-generated `<hostname>-<random-words>`, which is where names like
-  // `myhost-snazzy-lynx` and `sv4-dev-tender-matsumoto` came from. The launch
-  // flag also removes the whole TUI-timing dance: no readiness poll, no dialog.
   if (inst.remoteControl) parts.push('--remote-control', shq(inst.name));
   if (vault) parts.push('--add-dir', shq(vault));
   tmuxOn(host, 'send-keys', '-t', P(inst.name), parts.join(' '), 'Enter');
-  // Only a resume can stall on the "resume from summary?" chooser; answer it.
   if (resuming) whenClaudeReady(host, inst.name, () => {});
 }
 function powerOff(inst) {
@@ -374,9 +374,25 @@ function dismissRemoteDialog(host, name, tries = 30) {
   if (tries <= 0) return console.log('remote-control dialog never appeared:', name);
   setTimeout(() => dismissRemoteDialog(host, name, tries - 1), 1000);
 }
-function remoteControl(host, name, on) {
-  const t = P(name);
-  if (on) { tmuxOn(host, 'send-keys', '-t', t, `/remote-control ${name}`, 'Enter'); return dismissRemoteDialog(host, name); }
+function remoteControl(host, inst, on) {
+  const name = inst.name, t = P(name);
+  if (on) {
+    // If claude isn't up yet, powerOn will add the flag itself. If it IS running,
+    // the only way to NAME the RC session is to relaunch with the flag — the
+    // slash command enables RC but leaves the auto-generated name. --continue
+    // keeps the same conversation. exitClaude first, then relaunch once it's gone.
+    if (!claudeRunning(host, name)) return;
+    tmuxOn(host, 'send-keys', '-t', t, '/exit', 'Enter');
+    const relaunch = (tries = 20) => {
+      if (claudeRunning(host, name)) { if (tries > 0) setTimeout(() => relaunch(tries - 1), 700); return; }
+      // Normal launch: hasHistory() picks up the conversation we just exited and
+      // resumes it. Do NOT force --continue — on a folder with no saved history
+      // that flag makes claude exit immediately ("No conversation to continue").
+      launchClaude(host, inst);
+    };
+    setTimeout(() => relaunch(), 900);
+    return;
+  }
   tmuxOn(host, 'send-keys', '-t', t, '/remote-control', 'Enter');
   setTimeout(() => tmuxOn(host, 'send-keys', '-t', t, 'Up'), 1500);
   setTimeout(() => tmuxOn(host, 'send-keys', '-t', t, 'Up'), 2000);
@@ -586,7 +602,7 @@ const server = http.createServer(async (req, res) => {
     if (action === '/archive' && m === 'POST') { const b = await body(req); inst.archived = !!b.on; if (inst.archived && sessionExistsOn(hostOf(inst), inst.name)) powerOff(inst); touch(inst); saveState(state); return j(res, 200, view(inst)); }
     if (action === '/send' && m === 'POST') { const b = await body(req); tmuxOn(hostOf(inst), 'send-keys', '-t', P(inst.name), String(b.keys ?? ''), 'Enter'); return j(res, 200, { ok: true }); }
     if (action === '/exit-claude' && m === 'POST') { tmuxOn(hostOf(inst), 'send-keys', '-t', P(inst.name), '/exit', 'Enter'); return j(res, 200, { ok: true }); }
-    if (action === '/remote-control' && m === 'POST') { const b = await body(req); inst.remoteControl = !!b.on; touch(inst); saveState(state); if (sessionExistsOn(hostOf(inst), inst.name)) remoteControl(hostOf(inst), inst.name, !!b.on); return j(res, 200, view(inst)); }
+    if (action === '/remote-control' && m === 'POST') { const b = await body(req); inst.remoteControl = !!b.on; touch(inst); saveState(state); if (sessionExistsOn(hostOf(inst), inst.name)) remoteControl(hostOf(inst), inst, !!b.on); return j(res, 200, view(inst)); }
     // Moving hosts is only safe while stopped: the tmux session lives on the old host.
     if (action === '/host' && m === 'POST') { const b = await body(req);
       if (sessionExistsOn(hostOf(inst), inst.name)) return j(res, 400, { error: 'power the instance off before moving it' });

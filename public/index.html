@@ -16,6 +16,11 @@
   body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
   .hide{display:none!important}
   .hostb{font-size:9.5px;font-weight:800;letter-spacing:.06em;color:var(--dim);border:1px solid var(--line);border-radius:5px;padding:1px 5px;text-transform:uppercase;white-space:nowrap}
+  .hostpick{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:14px}
+  .hostpick button{appearance:none;border:1px solid var(--line);background:var(--card2);color:var(--dim);border-radius:9px;padding:8px 13px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;transition:.12s}
+  .hostpick button:hover:not(:disabled){border-color:#54514c;color:var(--fg)}
+  .hostpick button.sel{background:var(--accent);border-color:var(--accent);color:#2b1a12}
+  .hostpick button:disabled{opacity:.4;cursor:not-allowed}
   button{font-family:inherit}
   .btn{appearance:none;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:9px;padding:9px 13px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:.12s}
   .btn:hover{border-color:#54514c} .btn:active{transform:scale(.98)} .btn:disabled{opacity:.4;cursor:not-allowed}
@@ -334,9 +339,7 @@ function detailHTML(i){
     <div class="d-folder">${i.folder}</div>
     <div class="panel pad">
       <div class="mini">Host</div>
-      <select id="d_host" onchange="setHost(this.value)" ${r?'disabled':''}>
-        ${(STATE.hosts||[]).map(h=>`<option value="${esc(h.id)}" ${h.id===i.hostId?'selected':''}>${esc(h.label)}${h.local?' — this machine':''}</option>`).join('')}
-      </select>
+      <div class="hostpick" id="d_hostpick">${hostButtons('d_hostpick', i.hostId, 'setHost', r)}</div>
       <div style="color:var(--dim);font-size:11px;margin-top:5px">${r?'Power the instance off to move it — its tmux session lives on the current host.':'Where this instance\u2019s tmux session runs. The folder path is not migrated.'}</div>
     </div>
 
@@ -505,9 +508,7 @@ function showNew(){
     <div class="d-title" style="margin-bottom:20px">New instance</div>
     <div class="panel pad">
       <label class="fld">Host — where this instance's tmux session runs</label>
-      <select id="n_host" onchange="hostChanged()" style="width:100%;margin-bottom:14px">
-        ${(STATE.hosts||[]).map(h=>`<option value="${esc(h.id)}" ${h.id===(STATE.selfHost||'')?'selected':''}>${esc(h.label)}${h.local?' — this machine':''}</option>`).join('')}
-      </select>
+      <div class="hostpick" id="n_hostpick">${hostButtons('n_hostpick', n_selectedHost||(STATE.selfHost||''), 'pickNewHost', false)}</div>
       <label class="fld">Instance name</label>
       <input id="n_name" placeholder="e.g. web-app or new-idea" autocapitalize="off" autocomplete="off" oninput="updateFolderSel()">
       <label class="fld" style="margin-top:14px">Folder — tap a folder to select · tap ＋ to create one inside it</label>
@@ -523,18 +524,31 @@ function showNew(){
     <div class="panel">
       <div class="toggle"><span>Start now &amp; launch Claude</span><label class="sw"><input type="checkbox" id="n_startnow" checked><span class="track"></span></label></div>
       <div class="toggle"><span>Auto-start on boot (persist)</span><label class="sw"><input type="checkbox" id="n_autostart"><span class="track"></span></label></div>
-      <div class="toggle"><span>Enable remote-control</span><label class="sw"><input type="checkbox" id="n_remote"><span class="track"></span></label></div>
+      <div class="toggle"><span>Enable remote-control</span><label class="sw"><input type="checkbox" id="n_remote" checked><span class="track"></span></label></div>
       <div class="toggle"><span>Resume conversation on power-on</span><label class="sw"><input type="checkbox" id="n_resume" checked><span class="track"></span></label></div>
     </div>
     <div class="row"><button class="btn pri" style="flex:1;justify-content:center" onclick="create()">Create instance</button><button class="btn ghost" onclick="showEmpty()">Cancel</button></div>
     <p id="n_err" style="color:var(--danger);font-size:12px;margin:10px 0 0"></p>
   </div>`);
-  selectedFolder=null; renderFolderTree(); updateFolderSel(); hostChanged();
+  n_selectedHost=n_selectedHost||(STATE.selfHost||''); selectedFolder=null; renderFolderTree(); updateFolderSel(); hostChanged();
   setTimeout(()=>document.getElementById('n_name').focus(),50);
 }
 /* ---- folder tree picker ---- */
 let selectedFolder=null, newHostFolders=null;
-function newHostId(){ const el=document.getElementById('n_host'); return el?el.value:(STATE.selfHost||''); }
+let n_selectedHost=null;
+function hostButtons(containerId, selectedId, onclickName, disabled){
+  return (STATE.hosts||[]).map(h=>{
+    const sel=h.id===selectedId?' sel':'';
+    const d=disabled?' disabled':'';
+    const lbl=esc(h.label)+(h.local?' ·':'');
+    return `<button class="${sel.trim()}" data-host="${esc(h.id)}"${d} onclick="${onclickName}('${esc(h.id)}')">${lbl}</button>`;
+  }).join('');
+}
+function newHostId(){ return n_selectedHost || (STATE.selfHost||''); }
+function pickNewHost(id){ n_selectedHost=id;
+  document.querySelectorAll('#n_hostpick button').forEach(b=>b.classList.toggle('sel',b.dataset.host===id));
+  hostChanged();
+}
 async function hostChanged(){
   const c=document.getElementById('n_foldertree'); if(c) c.innerHTML='<div style="color:var(--dim);font-size:12px;padding:10px">Loading folders…</div>';
   selectedFolder=null;
